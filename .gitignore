@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+backups/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.vscode/

@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+dist
+backups
+*.db
+*.db-*
+*.md
+WaywardSolutions.png
+instructions.txt
+docker-compose.yml
+.DS_Store
+.vscode

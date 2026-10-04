@@ -1,0 +1,35 @@
+name: dynamic-qr
+
+services:
+  app:
+    build: .
+    image: dynamic-qr:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/qr.db
+    volumes:
+      - qr-data:/data
+    # Only reachable from this computer (for local admin and testing).
+    # The public internet reaches the app ONLY through the Cloudflare Tunnel.
+    ports:
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  qr-data:

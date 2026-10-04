@@ -1,0 +1,81 @@
+Build me a self-hosted dynamic QR code / short-link service, similar to QR.io, for my HOA. I am not a developer, so keep the setup simple and explain every manual step.
+
+## Purpose
+I print a QR code on a permanent sign. The QR code encodes a short URL on my own domain (e.g. https://MYDOMAIN.com/agenda). That URL redirects to whatever destination I set in an admin dashboard. Before each meeting I change the destination; the printed QR code never changes.
+
+## Hosting (use exactly this)
+- Self-hosted with Docker Compose on my own machine
+- Exposed to the internet ONLY through a Cloudflare Tunnel (cloudflared), using a tunnel token created in the Cloudflare Zero Trust dashboard. No ports forwarded on my router.
+- docker-compose.yml with two services:
+  1. `app`: the web application
+  2. `cloudflared`: the official cloudflare/cloudflared image, running `tunnel run` with TUNNEL_TOKEN from the .env file, routing to http://app:PORT over the internal Docker network
+- The app's port must NOT be published publicly. Optionally bind it to 127.0.0.1 only, for local admin access and testing.
+- Both services use `restart: unless-stopped`
+- Must run on both x86_64 and ARM64 (e.g. Raspberry Pi)
+
+## Tech stack (use exactly this)
+- Node.js LTS with TypeScript
+- A lightweight web framework (Hono or Fastify)
+- SQLite via better-sqlite3, with the database file on a named Docker volume so data survives rebuilds and updates
+- Schema migrations that run automatically on startup
+- Admin UI is plain server-rendered HTML/CSS/JS (no separate frontend build server)
+- QR generation using a well-maintained library (e.g. the `qrcode` npm package), served from the app, not a CDN
+- Dockerfile: multi-stage build, small final image, runs as a non-root user, includes a HEALTHCHECK
+- All configuration through a .env file, with a documented .env.example
+
+## Core features
+1. **Redirects**: GET /{slug} looks up the slug and returns a 302 (NOT 301) redirect to the destination, with `Cache-Control: no-store`. Unknown slugs show a friendly 404 page. The root path `/` redirects to a configurable default URL (or shows a simple landing page if none is set).
+2. **Scan tracking**: Each redirect increments a counter and logs a row (slug, timestamp, country from the `CF-IPCountry` header that Cloudflare adds, rough device type from the user agent). Do NOT store IP addresses. Logging must not noticeably slow down the redirect.
+3. **Admin dashboard** at /admin:
+   - List all links: slug, destination, total scans, scans in the last 30 days, last updated
+   - Create a link (slug + destination + optional note)
+   - Edit a link's destination and note (the slug stays fixed once created, since it may be printed)
+   - Delete a link, with a confirmation that warns that printed codes will stop working
+   - For each link, show the full short URL with a copy button and a QR code preview
+   - Download the QR code as SVG and as high-resolution PNG (at least 2000x2000 px), error correction level H, with a quiet-zone margin. Option to add the short URL as text under the code in the PNG.
+   - A simple chart or table of scans per day for each link
+   - Mobile-friendly, so I can update the agenda link from my phone
+4. **Change history**: Keep a log of destination changes per link (old URL, new URL, timestamp), viewable in the dashboard.
+
+## Security
+- Admin is protected by a single password (ADMIN_PASSWORD in .env). Login sets an HttpOnly, Secure, SameSite=Strict session cookie signed with HMAC using SESSION_SECRET from .env. Sessions expire after 30 days.
+- The app sits behind Cloudflare, which terminates HTTPS, so the app receives plain HTTP from cloudflared. Configure proxy trust so Secure cookies and redirects work correctly. Use the `CF-Connecting-IP` header to identify clients for rate limiting only (never store it).
+- Basic login rate limiting (e.g. lock out after 5 failed attempts for 15 minutes).
+- CSRF protection on all state-changing admin requests.
+- Validate destinations: only http:// and https:// URLs allowed.
+- Slugs: lowercase letters, numbers, and hyphens only, 1-50 characters. Reserve "admin", "api", "login", "logout", "static", "health", "favicon.ico", "robots.txt".
+- Add a robots.txt that disallows /admin.
+- Add a /health endpoint for the Docker healthcheck.
+- In the README, explain how to OPTIONALLY add a Cloudflare Access policy in front of /admin (e.g. email one-time PIN to my address) as an extra layer on top of the password.
+
+## Configuration (.env)
+- BASE_URL (e.g. https://MYDOMAIN.com), used for building short URLs and QR codes
+- ADMIN_PASSWORD, SESSION_SECRET (include a one-line command to generate a strong random secret)
+- TUNNEL_TOKEN
+- DEFAULT_REDIRECT_URL (optional)
+- PORT (default 3000)
+- TZ (default America/New_York)
+
+## Deliverables
+1. Complete, working project: Dockerfile, docker-compose.yml, .env.example, .dockerignore, migrations, and all source files
+2. Automated tests (Vitest) covering redirects, 404s, slug validation, auth, rate limiting, and scan logging
+3. A backup script that safely copies the SQLite database (using SQLite's backup API or `.backup`, not a raw file copy while running) to a timestamped file, plus instructions to schedule it with cron
+4. A README.md written for a non-developer, with numbered step-by-step instructions:
+   - Installing Docker and Docker Compose
+   - My domain is already registered with Cloudflare, so skip any DNS migration. Instead, explain how to check the domain's existing DNS records in the Cloudflare dashboard and remove or adjust any record that would conflict with the tunnel's hostname (e.g. an existing A, AAAA, or CNAME record on the root domain), since adding the tunnel's Public Hostname creates its own CNAME record automatically.
+   - Creating a Cloudflare Tunnel in the Zero Trust dashboard, copying the token, and adding a Public Hostname that routes MYDOMAIN.com to http://app:3000
+   - Filling in .env
+   - Starting everything with `docker compose up -d` and checking the logs
+   - Creating my first link (/agenda) and downloading the QR code for printing
+   - How to update the destination before each meeting
+   - Updating the app later without losing data
+   - Backing up and restoring the database
+   - Optional: Cloudflare Access in front of /admin
+   - Print tips: size the QR code at least 10-12 inches wide for a roadside sign, dark on white, test with multiple phones before printing
+   - Troubleshooting (tunnel not connecting, 502 errors, login loops caused by cookie/proxy settings, permission errors on the volume)
+
+## Process
+- Before writing code, briefly show me the plan and file structure.
+- After building, run the tests and fix any failures.
+- Build the image and run it locally with Docker (without the tunnel) to confirm that creating a link, redirecting, and QR download all work.
+- Then walk me through the Cloudflare Tunnel setup and deployment one step at a time, waiting for me to confirm each step.
