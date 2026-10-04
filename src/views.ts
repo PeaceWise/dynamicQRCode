@@ -1,3 +1,6 @@
+import { presetIconSvg } from './qr.js';
+import type { QrDesign } from './qrDesign.js';
+
 // Server-rendered HTML. Every interpolated value is HTML-escaped unless it is
 // itself the output of the `html` tag.
 
@@ -39,6 +42,8 @@ export interface LinkRow {
   scan_count: number;
   created_at: number;
   updated_at: number;
+  qr_design: string;
+  stats_reset_at: number | null;
 }
 
 export interface LinkListItem extends LinkRow {
@@ -168,6 +173,7 @@ interface DashboardOptions {
   error?: string;
   form?: { slug?: string; destination?: string; note?: string };
   flash?: string;
+  ignoringDevice: boolean;
 }
 
 export function dashboardPage(o: DashboardOptions): Html {
@@ -216,8 +222,174 @@ export function dashboardPage(o: DashboardOptions): Html {
         </label>
         <button type="submit" class="btn btn-primary">Create link</button>
       </form>
+    </section>
+
+    <section class="card" id="scans">
+      <h2>Test scans</h2>
+      ${deviceToggle(o.csrf, o.ignoringDevice, '/admin')}
     </section>`,
   );
+}
+
+function deviceToggle(csrf: string, ignoring: boolean, back: string): Html {
+  return html`<form method="post" action="/admin/device" class="device-toggle">
+    <input type="hidden" name="_csrf" value="${csrf}">
+    <input type="hidden" name="back" value="${back}">
+    ${
+      ignoring
+        ? html`<p><span class="badge">✓ This device is not counted</span> Scans you make from this browser are not added to the statistics.</p>
+          <input type="hidden" name="ignore" value="0">
+          <button type="submit" class="btn">Count this device again</button>`
+        : html`<p class="muted">Testing your signs? Open this page on <b>the phone you test with</b> (in the browser your camera opens, usually Safari on iPhone or Chrome on Android) and tap the button. Your own scans won't be counted.</p>
+          <input type="hidden" name="ignore" value="1">
+          <button type="submit" class="btn">Don't count scans from this device</button>`
+    }
+  </form>`;
+}
+
+function tile(name: string, value: string, current: string, label: string, visual: Html): Html {
+  return html`<label class="tile">
+    <input type="radio" name="${name}" value="${value}" ${value === current ? html`checked` : ''}>
+    <span class="tile-visual">${visual}</span>
+    <span class="tile-label">${label}</span>
+  </label>`;
+}
+
+function thumb(qrBase: string, params: Record<string, string>): Html {
+  const qs = new URLSearchParams({ preview: '1', thumb: '1', ...params }).toString();
+  return html`<img src="${qrBase}/qr.svg?${qs}" alt="" width="64" height="64" loading="lazy">`;
+}
+
+function designSection(o: {
+  csrf: string;
+  slug: string;
+  shortUrl: string;
+  design: QrDesign;
+  hasCustomLogo: boolean;
+  error?: string;
+}): Html {
+  const d = o.design;
+  const qrBase = `/admin/links/${o.slug}`;
+  const color = (name: keyof QrDesign, label: string, hint: string) =>
+    html`<label class="color-field"><input type="color" name="${name}" value="${String(d[name])}"><span>${label}<small class="muted">${hint}</small></span></label>`;
+  const logos: [string, string, Html][] = [
+    ['none', 'None', html`<span class="tile-none">✕</span>`],
+    ['wayward', 'Wayward', html`<img src="/static/logo-mark.png" alt="" width="44" height="44">`],
+    ...(['agenda', 'calendar', 'home', 'link'] as const).map(
+      (k): [string, string, Html] => [k, k[0].toUpperCase() + k.slice(1), new Html(presetIconSvg(k, d.accent) ?? '')],
+    ),
+  ];
+  if (o.hasCustomLogo) logos.push(['custom', 'Your logo', html`<img src="${qrBase}/logo.png" alt="" width="44" height="44">`]);
+
+  return html`<section class="card" id="design">
+    <h2>QR code</h2>
+    ${o.error ? html`<p class="alert alert-error" role="alert">${o.error}</p>` : ''}
+    <div class="qr-wrap">
+      <div class="preview-col">
+        <img id="qr-preview" class="qr" src="${qrBase}/qr.svg?inline=1" data-base="${qrBase}" alt="QR code for ${o.shortUrl}">
+        <p id="design-dirty" class="small preview-note" hidden>Preview of unsaved changes. Click <b>Save design</b> to use it for downloads.</p>
+        <p id="design-warning" class="alert alert-error small" hidden></p>
+      </div>
+      <div class="stack downloads">
+        <a class="btn" href="${qrBase}/qr.svg">Download SVG <small>(best for print shops)</small></a>
+        <a class="btn" href="${qrBase}/qr.png">Download PNG <small>(2400 px)</small></a>
+        <a class="btn" href="${qrBase}/qr.png?label=1">Download PNG with URL text</a>
+        <p class="muted small">Downloads use the saved design. Error correction level H with a quiet zone. Test with several phones before printing.</p>
+      </div>
+    </div>
+
+    <form method="post" action="${qrBase}/logo" enctype="multipart/form-data" id="logo-form">
+      <input type="hidden" name="_csrf" value="${o.csrf}">
+    </form>
+
+    <form method="post" action="${qrBase}/design" id="design-form">
+      <input type="hidden" name="_csrf" value="${o.csrf}">
+      <h3 class="design-title">Design your QR code</h3>
+      <div class="tabs">
+        <input type="radio" name="_tab" id="tab-frame" checked><label for="tab-frame">Frame</label>
+        <input type="radio" name="_tab" id="tab-shape"><label for="tab-shape">Shape</label>
+        <input type="radio" name="_tab" id="tab-logo"><label for="tab-logo">Logo</label>
+        <input type="radio" name="_tab" id="tab-colors"><label for="tab-colors">Colors</label>
+
+        <div class="panel panel-frame">
+          <div class="tiles">
+            ${tile('frame', 'none', d.frame, 'None', html`<span class="tile-none">✕</span>`)}
+            ${tile('frame', 'box', d.frame, 'Bottom', thumb(qrBase, { frame: 'box' }))}
+            ${tile('frame', 'top', d.frame, 'Top', thumb(qrBase, { frame: 'top' }))}
+            ${tile('frame', 'pill', d.frame, 'Badge', thumb(qrBase, { frame: 'pill' }))}
+          </div>
+          <label>Frame text
+            <input name="frameText" value="${d.frameText}" maxlength="24" placeholder="SCAN ME">
+          </label>
+          <p class="muted small">The frame color is under <b>Colors</b>.</p>
+        </div>
+
+        <div class="panel panel-shape">
+          <h4>Pattern</h4>
+          <div class="tiles">
+            ${tile('dots', 'square', d.dots, 'Square', thumb(qrBase, { dots: 'square', frame: 'none' }))}
+            ${tile('dots', 'rounded', d.dots, 'Rounded', thumb(qrBase, { dots: 'rounded', frame: 'none' }))}
+            ${tile('dots', 'dots', d.dots, 'Dots', thumb(qrBase, { dots: 'dots', frame: 'none' }))}
+          </div>
+          <h4>Corner frames</h4>
+          <div class="tiles">
+            ${tile('eyeFrame', 'square', d.eyeFrame, 'Square', thumb(qrBase, { eyeFrame: 'square', frame: 'none' }))}
+            ${tile('eyeFrame', 'rounded', d.eyeFrame, 'Rounded', thumb(qrBase, { eyeFrame: 'rounded', frame: 'none' }))}
+            ${tile('eyeFrame', 'circle', d.eyeFrame, 'Circle', thumb(qrBase, { eyeFrame: 'circle', frame: 'none' }))}
+          </div>
+          <h4>Corner centers</h4>
+          <div class="tiles">
+            ${tile('eyeBall', 'square', d.eyeBall, 'Square', thumb(qrBase, { eyeBall: 'square', frame: 'none' }))}
+            ${tile('eyeBall', 'rounded', d.eyeBall, 'Rounded', thumb(qrBase, { eyeBall: 'rounded', frame: 'none' }))}
+            ${tile('eyeBall', 'circle', d.eyeBall, 'Circle', thumb(qrBase, { eyeBall: 'circle', frame: 'none' }))}
+          </div>
+        </div>
+
+        <div class="panel panel-logo">
+          <div class="tiles">${logos.map(([value, label, visual]) => tile('logo', value, d.logo, label, visual))}</div>
+          <div class="logo-options">
+            <fieldset class="segmented">
+              <legend>Logo size</legend>
+              ${(['small', 'medium', 'large'] as const).map(
+                (size) => html`<label><input type="radio" name="logoSize" value="${size}" ${d.logoSize === size ? html`checked` : ''}><span>${size[0].toUpperCase() + size.slice(1)}</span></label>`,
+              )}
+            </fieldset>
+            <label class="check"><input type="checkbox" name="logoClear" value="1" ${d.logoClear ? html`checked` : ''}> Remove the pattern behind the logo</label>
+          </div>
+          <div class="upload">
+            <h4>Upload your own logo</h4>
+            <p class="muted small">PNG or JPEG, up to 2 MB. A square logo with a transparent or white background works best.</p>
+            <div class="upload-row">
+              <input type="file" name="logo" accept="image/png,image/jpeg" form="logo-form" required>
+              <button type="submit" class="btn" form="logo-form">Upload</button>
+            </div>
+            ${
+              o.hasCustomLogo
+                ? html`<button type="submit" class="btn btn-ghost small" form="logo-remove-form">Remove uploaded logo</button>`
+                : ''
+            }
+          </div>
+        </div>
+
+        <div class="panel panel-colors">
+          <div class="colors">
+            ${color('fg', 'Pattern', 'the small squares')}
+            ${color('eye', 'Corners', 'the three big squares')}
+            ${color('bg', 'Background', 'keep it light')}
+            ${color('accent', 'Frame & icon', 'any color')}
+          </div>
+          <p class="muted small">For reliable scanning use dark colors on a light background. Very light colors are refused when you save.</p>
+        </div>
+      </div>
+      <div class="design-actions">
+        <button type="submit" class="btn btn-primary">Save design</button>
+        <a class="btn btn-ghost" href="${qrBase}#design">Discard changes</a>
+      </div>
+    </form>
+    <form method="post" action="${qrBase}/logo/delete" id="logo-remove-form">
+      <input type="hidden" name="_csrf" value="${o.csrf}">
+    </form>
+  </section>`;
 }
 
 function scanChart(daily: LinkStats['daily']): Html {
@@ -244,6 +416,10 @@ interface LinkPageOptions {
   error?: string;
   flash?: string;
   form?: { destination?: string; note?: string };
+  design: QrDesign;
+  designError?: string;
+  hasCustomLogo: boolean;
+  ignoringDevice: boolean;
 }
 
 export function linkPage(o: LinkPageOptions): Html {
@@ -281,21 +457,15 @@ export function linkPage(o: LinkPageOptions): Html {
       <p class="muted small">The printed QR code keeps working. Scans go to the new destination right away.</p>
     </section>
 
-    <section class="card">
-      <h2>QR code</h2>
-      <div class="qr-wrap">
-        <img class="qr" src="${qrBase}/qr.svg?inline=1" alt="QR code for ${o.shortUrl}" width="240" height="240">
-        <div class="stack">
-          <a class="btn" href="${qrBase}/qr.svg">Download SVG <small>(best for print shops)</small></a>
-          <a class="btn" href="${qrBase}/qr.png">Download PNG <small>(2400 px)</small></a>
-          <a class="btn" href="${qrBase}/qr.png?label=1">Download PNG with URL text</a>
-          <p class="muted small">Error correction level H with a white quiet zone. Test with several phones before printing.</p>
-        </div>
-      </div>
-    </section>
+    ${designSection({ csrf: o.csrf, slug: link.slug, shortUrl: o.shortUrl, design: o.design, hasCustomLogo: o.hasCustomLogo, error: o.designError })}
 
-    <section class="card">
+    <section class="card" id="scans">
       <h2>Scans</h2>
+      ${
+        link.stats_reset_at
+          ? html`<p class="muted small">Counting since ${formatTime(link.stats_reset_at, o.tz)}, when the statistics were reset.</p>`
+          : ''
+      }
       <div class="stats">
         <div><b>${link.scan_count}</b><span>total</span></div>
         <div><b>${stats.last30}</b><span>last 30 days</span></div>
@@ -316,6 +486,18 @@ export function linkPage(o: LinkPageOptions): Html {
         </div>`
           : ''
       }
+      <div class="scan-tools">
+        ${deviceToggle(o.csrf, o.ignoringDevice, `/admin/links/${link.slug}`)}
+        <details class="reset">
+          <summary>Reset scan statistics…</summary>
+          <form method="post" action="/admin/links/${link.slug}/reset-stats" class="stack">
+            <input type="hidden" name="_csrf" value="${o.csrf}">
+            <p class="muted small">Use this after testing, before the sign goes up. The link and its destination are not changed.</p>
+            <label class="check"><input type="checkbox" name="confirm" value="yes" required> Permanently delete all ${link.scan_count} scan${link.scan_count === 1 ? '' : 's'} of /${link.slug} and start counting from zero</label>
+            <button type="submit" class="btn btn-danger">Reset to zero</button>
+          </form>
+        </details>
+      </div>
     </section>
 
     <section class="card">

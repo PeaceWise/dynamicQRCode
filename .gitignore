@@ -7,3 +7,5 @@ backups/
 *.db-wal
 .DS_Store
 .vscode/
+referenceImages/
+referenceimages/

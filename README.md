@@ -9,7 +9,9 @@ A self-hosted dynamic QR code and short-link service. You print a QR code once (
 - 📱 Mobile-friendly dashboard at `https://MYDOMAIN.com/admin`, so you can update the agenda link from your phone
 - 📊 Scan counts, scans per day, rough device type and country. **No IP addresses are stored.**
 - 🕑 A history of every destination change
+- 🎨 QR code design: frames with your own text ("SCAN ME"), rounded or dot patterns, corner styles, colors, and a logo in the middle (yours, or a built-in icon), with a live preview
 - 🖨️ Print-ready downloads: vector SVG, and 2400 × 2400 px PNG with optional URL text, at the highest error-correction level
+- 🧪 Reset scan counts after testing, and an option to never count scans from your own phone
 - 🔒 Runs on your own computer or Raspberry Pi. It's reachable from the internet only through a Cloudflare Tunnel, so no router ports are opened.
 
 ---
@@ -23,6 +25,8 @@ A self-hosted dynamic QR code and short-link service. You print a QR code once (
 5. [Fill in the .env settings file](#5-fill-in-the-env-settings-file)
 6. [Start everything](#6-start-everything)
 7. [Create your first link (/agenda) and download the QR code](#7-create-your-first-link-agenda-and-download-the-qr-code)
+   - [Customize the QR code (frame, shape, logo, colors)](#customize-the-qr-code-frame-shape-logo-colors)
+   - [Keep test scans out of the statistics](#keep-test-scans-out-of-the-statistics)
 8. [Update the destination before each meeting](#8-update-the-destination-before-each-meeting)
 9. [Update the app later without losing data](#9-update-the-app-later-without-losing-data)
 10. [Back up and restore](#10-back-up-and-restore)
@@ -184,6 +188,30 @@ The app restarts automatically after a crash or reboot (as long as Docker itself
    - **Download PNG with URL text** has the short address printed below the code, for people who can't scan.
 
 Slugs can use lowercase letters, numbers, and hyphens. **A slug can't be changed after it's created**, because it may already be printed.
+
+### Customize the QR code (frame, shape, logo, colors)
+
+On the link's page, under **Design your QR code**, there are four tabs. The preview on the left updates as you click.
+
+| Tab | What you can change |
+|---|---|
+| **Frame** | No frame, a colored frame with a text bar at the bottom or top, or a "badge" label underneath. Type your own text, for example `SCAN FOR AGENDA` (up to 24 characters). |
+| **Shape** | The pattern (square, rounded, or dots) and the style of the three big corner squares and their centers. |
+| **Logo** | The Wayward Solutions logo, a built-in icon (agenda, calendar, home, link), or **upload your own** PNG/JPEG. You can also pick the logo size and whether the pattern behind the logo is removed. |
+| **Colors** | Pattern, corner, background, and frame/icon colors. |
+
+Click **Save design** when you're happy. The download buttons always use the **saved** design.
+
+Good to know:
+- **The design never changes where the code leads.** You can restyle and re-download at any time. Codes that are already printed keep working.
+- The code uses the highest error-correction level, which lets a logo cover part of it and still scan. Logo sizes are limited to a safe range.
+- Colors that are too light to scan are refused when you save. A warning appears in the preview first. Keep the pattern **dark on a light background**. The bright logo blue (#1CBBFC) is too light for the pattern itself, but it works well for the frame. The darker brand blue (#0877AD) works for the pattern.
+- Every style option is automatically test-scanned during development. Still, **always test the final print with several phones**, especially with a large logo or the dot pattern.
+
+### Keep test scans out of the statistics
+
+- **Reset after testing:** on the link's page, scroll to **Scans** → **Reset scan statistics…**, tick the box, and click **Reset to zero**. This deletes the scans for that one link and shows "Counting since …". The link and its destination aren't changed.
+- **Never count your own phone:** open the admin page **on the phone you test with**, in the browser that opens when you scan a code (usually Safari on iPhone, Chrome on Android), and tap **Don't count scans from this device**. Scans from that browser still redirect normally but aren't counted. It lasts about a year, or until you clear that browser's cookies. Tap **Count this device again** to undo it.
 
 ## 8. Update the destination before each meeting
 

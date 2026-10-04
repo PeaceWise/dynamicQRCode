@@ -2,20 +2,26 @@ import { readFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import {
+  IGNORE_DEVICE_COOKIE,
+  IGNORE_DEVICE_MAX_AGE_SECONDS,
   SESSION_COOKIE,
   SESSION_MAX_AGE_SECONDS,
   checkPassword,
   createSessionToken,
   csrfToken,
+  ignoreDeviceToken,
+  isIgnoredDevice,
   verifyCsrf,
   verifySessionToken,
   type Session,
 } from './auth.js';
 import type { Config } from './config.js';
 import type { DB } from './db.js';
-import { qrPng, qrSvg } from './qr.js';
+import { normalizeLogo, qrPng, qrSvg } from './qr.js';
+import { loadDesign, parseDesign, scanProblem, type QrDesign } from './qrDesign.js';
 import { LoginLimiter } from './rateLimit.js';
 import { ScanLogger } from './scans.js';
 import { deviceType, validateDestination, validateNote, validateSlug } from './validation.js';
@@ -40,7 +46,7 @@ const STATIC_TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.png': 'image/png',
 };
-const STATIC_FILES = ['admin.css', 'admin.js', 'logo.png', 'favicon.png'];
+const STATIC_FILES = ['admin.css', 'admin.js', 'logo.png', 'logo-mark.png', 'favicon.png'];
 
 type AppEnv = { Variables: { session: Session; csrf: string } };
 
@@ -107,6 +113,16 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
     ),
     updateLink: db.prepare('UPDATE links SET destination = ?, note = ?, updated_at = ? WHERE id = ?'),
     deleteLink: db.prepare('DELETE FROM links WHERE id = ?'),
+    saveDesign: db.prepare('UPDATE links SET qr_design = ? WHERE id = ?'),
+    getLogo: db.prepare<[number], { png: Buffer }>('SELECT png FROM link_logos WHERE link_id = ?'),
+    hasLogo: db.prepare<[number], { link_id: number }>('SELECT link_id FROM link_logos WHERE link_id = ?'),
+    saveLogo: db.prepare(
+      `INSERT INTO link_logos (link_id, png, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(link_id) DO UPDATE SET png = excluded.png, updated_at = excluded.updated_at`,
+    ),
+    deleteLogo: db.prepare('DELETE FROM link_logos WHERE link_id = ?'),
+    resetScans: db.prepare('DELETE FROM scans WHERE link_id = ?'),
+    resetCount: db.prepare('UPDATE links SET scan_count = 0, stats_reset_at = ? WHERE id = ?'),
     insertHistory: db.prepare(
       'INSERT INTO link_history (link_id, old_destination, new_destination, changed_at) VALUES (?, ?, ?, ?)',
     ),
@@ -175,6 +191,8 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
   function currentSession(c: Context): Session | null {
     return verifySessionToken(getCookie(c, SESSION_COOKIE), config.sessionSecret, config.adminPassword, now());
   }
+
+  const ignoringDevice = (c: Context) => isIgnoredDevice(config.sessionSecret, getCookie(c, IGNORE_DEVICE_COOKIE));
 
   // --- Global middleware ---------------------------------------------------
 
@@ -312,6 +330,14 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
     c.set('csrf', csrf);
     await next();
   };
+  // Logo uploads are the largest requests; cap everything under /admin well above that.
+  app.use(
+    '/admin/*',
+    bodyLimit({
+      maxSize: 3 * 1024 * 1024,
+      onError: (c) => c.html(errorPage('File too big', 'The logo file is too big (max 2 MB).').value, 413),
+    }),
+  );
   app.use('/admin', requireAdmin);
   app.use('/admin/*', requireAdmin);
 
@@ -321,6 +347,7 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
       baseUrl: config.baseUrl,
       tz: config.tz,
       links: q.listLinks.all(now() - 30 * DAY_MS),
+      ignoringDevice: ignoringDevice(c),
       ...extra,
     }).value;
 
@@ -359,7 +386,13 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
   const renderLink = (
     c: Context<AppEnv>,
     link: LinkRow,
-    extra: { error?: string; flash?: string; form?: { destination?: string; note?: string } } = {},
+    extra: {
+      error?: string;
+      flash?: string;
+      form?: { destination?: string; note?: string };
+      design?: QrDesign;
+      designError?: string;
+    } = {},
   ) =>
     linkPage({
       csrf: c.get('csrf'),
@@ -368,17 +401,29 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
       link,
       stats: linkStats(link.id),
       history: q.history.all(link.id),
+      design: loadDesign(link.qr_design),
+      hasCustomLogo: Boolean(q.hasLogo.get(link.id)),
+      ignoringDevice: ignoringDevice(c),
       ...extra,
     }).value;
+
+  const customLogoUri = (link: LinkRow) => {
+    const logo = q.getLogo.get(link.id);
+    return logo ? `data:image/png;base64,${Buffer.from(logo.png).toString('base64')}` : null;
+  };
 
   app.get('/admin/links/:slug', (c) => {
     const link = findLink(c);
     if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
-    const flash = c.req.query('created')
-      ? 'Link created. Download the QR code below.'
-      : c.req.query('saved')
-        ? 'Saved. The QR code now sends people to the new destination.'
-        : undefined;
+    const flashes: Record<string, string> = {
+      created: 'Link created. Download the QR code below.',
+      saved: 'Saved. The QR code now sends people to the new destination.',
+      designed: 'QR design saved. Downloads now use the new design.',
+      logo: 'Logo uploaded and selected. Click "Save design" after any other changes.',
+      reset: 'Scan statistics were reset to zero.',
+    };
+    const key = Object.keys(flashes).find((k) => c.req.query(k));
+    const flash = key ? flashes[key] : undefined;
     return c.html(renderLink(c, link, { flash }));
   });
 
@@ -427,23 +472,124 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
     return c.redirect(`/admin?deleted=${encodeURIComponent(link.slug)}`, 303);
   });
 
+  // QR downloads use the saved design. `?preview=1` overlays unsaved form values
+  // (live preview while editing); `&thumb=1` leaves the logo out (option tiles).
   app.get('/admin/links/:slug/qr.svg', (c) => {
     const link = findLink(c);
     if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
+    const saved = loadDesign(link.qr_design);
+    const preview = Boolean(c.req.query('preview'));
+    const design = preview ? parseDesign(c.req.query(), saved) : saved;
+    const thumb = Boolean(c.req.query('thumb'));
     const headers: Record<string, string> = { 'Content-Type': 'image/svg+xml; charset=utf-8' };
-    if (!c.req.query('inline')) headers['Content-Disposition'] = `attachment; filename="qr-${link.slug}.svg"`;
-    return c.body(qrSvg(shortUrl(link.slug)), 200, headers);
+    if (!c.req.query('inline') && !preview) {
+      headers['Content-Disposition'] = `attachment; filename="qr-${link.slug}.svg"`;
+    }
+    const svg = qrSvg(shortUrl(link.slug), design, {
+      customLogo: thumb ? null : customLogoUri(link),
+      noLogo: thumb,
+      label: c.req.query('label') ? displayUrl(shortUrl(link.slug)) : undefined,
+    });
+    return c.body(svg, 200, headers);
   });
 
   app.get('/admin/links/:slug/qr.png', (c) => {
     const link = findLink(c);
     if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
     const withLabel = Boolean(c.req.query('label'));
-    const png = qrPng(shortUrl(link.slug), withLabel ? displayUrl(shortUrl(link.slug)) : undefined);
+    const png = qrPng(shortUrl(link.slug), loadDesign(link.qr_design), {
+      customLogo: customLogoUri(link),
+      label: withLabel ? displayUrl(shortUrl(link.slug)) : undefined,
+    });
     return c.body(new Uint8Array(png), 200, {
       'Content-Type': 'image/png',
       'Content-Disposition': `attachment; filename="qr-${link.slug}${withLabel ? '-with-url' : ''}.png"`,
     });
+  });
+
+  app.get('/admin/links/:slug/logo.png', (c) => {
+    const link = findLink(c);
+    const logo = link ? q.getLogo.get(link.id) : undefined;
+    if (!logo) return c.html(errorPage('No logo', 'This link has no uploaded logo.').value, 404);
+    return c.body(new Uint8Array(logo.png), 200, { 'Content-Type': 'image/png' });
+  });
+
+  app.post('/admin/links/:slug/design', async (c) => {
+    const link = findLink(c);
+    if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
+    const body = await c.req.parseBody();
+    // An unticked checkbox is simply missing from the form, so read it explicitly.
+    const design = parseDesign({ ...body, logoClear: body.logoClear ? '1' : '0' }, loadDesign(link.qr_design));
+    let problem = scanProblem(design);
+    if (!problem && design.logo === 'custom' && !q.hasLogo.get(link.id)) {
+      problem = 'Upload your logo first, or pick one of the other logos.';
+    }
+    if (problem) return c.html(renderLink(c, link, { design, designError: problem }), 400);
+    q.saveDesign.run(JSON.stringify(design), link.id);
+    return c.redirect(`/admin/links/${link.slug}?designed=1#design`, 303);
+  });
+
+  app.post('/admin/links/:slug/logo', async (c) => {
+    const link = findLink(c);
+    if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
+    const body = await c.req.parseBody();
+    const file = body.logo;
+    if (!(file instanceof File)) {
+      return c.html(renderLink(c, link, { designError: 'Please choose an image file.' }), 400);
+    }
+    const result = normalizeLogo(new Uint8Array(await file.arrayBuffer()));
+    if (!result.ok) return c.html(renderLink(c, link, { designError: result.error }), 400);
+    const design = { ...loadDesign(link.qr_design), logo: 'custom' as const };
+    db.transaction(() => {
+      q.saveLogo.run(link.id, result.png, now());
+      q.saveDesign.run(JSON.stringify(design), link.id);
+    })();
+    return c.redirect(`/admin/links/${link.slug}?logo=1#design`, 303);
+  });
+
+  app.post('/admin/links/:slug/logo/delete', (c) => {
+    const link = findLink(c);
+    if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
+    const design = loadDesign(link.qr_design);
+    db.transaction(() => {
+      q.deleteLogo.run(link.id);
+      if (design.logo === 'custom') q.saveDesign.run(JSON.stringify({ ...design, logo: 'none' }), link.id);
+    })();
+    return c.redirect(`/admin/links/${link.slug}?designed=1#design`, 303);
+  });
+
+  // --- Scan statistics -------------------------------------------------------
+
+  app.post('/admin/links/:slug/reset-stats', async (c) => {
+    const link = findLink(c);
+    if (!link) return c.html(errorPage('Link not found', 'That link does not exist.').value, 404);
+    const body = await c.req.parseBody();
+    if (body.confirm !== 'yes') {
+      return c.html(errorPage('Not reset', 'Tick the confirmation box to reset the scan statistics.').value, 400);
+    }
+    scanLogger.flush(); // write any queued scans first so none sneak in after the reset
+    db.transaction(() => {
+      q.resetScans.run(link.id);
+      q.resetCount.run(now(), link.id);
+    })();
+    return c.redirect(`/admin/links/${link.slug}?reset=1#scans`, 303);
+  });
+
+  app.post('/admin/device', async (c) => {
+    const body = await c.req.parseBody();
+    const back = typeof body.back === 'string' && /^\/admin(\/[a-z0-9-]*)*$/.test(body.back) ? body.back : '/admin';
+    if (body.ignore === '1') {
+      setCookie(c, IGNORE_DEVICE_COOKIE, ignoreDeviceToken(config.sessionSecret), {
+        httpOnly: true,
+        secure: useSecureCookie(c),
+        sameSite: 'Lax', // must be sent when a QR scan opens the short link
+        path: '/',
+        maxAge: IGNORE_DEVICE_MAX_AGE_SECONDS,
+      });
+    } else {
+      deleteCookie(c, IGNORE_DEVICE_COOKIE, { path: '/', secure: useSecureCookie(c), httpOnly: true, sameSite: 'Lax' });
+    }
+    return c.redirect(`${back}#scans`, 303);
   });
 
   // --- Public redirects (must be registered last) --------------------------
@@ -455,7 +601,7 @@ export function createApp({ db, config, now = Date.now, limiter = new LoginLimit
       c.header('Cache-Control', 'no-store');
       return c.html(notFoundPage().value, 404);
     }
-    if (c.req.method === 'GET') {
+    if (c.req.method === 'GET' && !ignoringDevice(c)) {
       const country = c.req.header('cf-ipcountry')?.toUpperCase();
       scanLogger.record({
         linkId: link.id,

@@ -64,6 +64,19 @@ export function verifySessionToken(
   return { sid: payload.sid, exp: payload.exp };
 }
 
+// "Don't count scans from this device": a long-lived cookie set on the admin's own
+// phone/browser. SameSite=Lax so it is sent when a QR scan opens the link.
+export const IGNORE_DEVICE_COOKIE = 'qr_ignore';
+export const IGNORE_DEVICE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60; // browsers cap cookies at 400 days
+
+export function ignoreDeviceToken(secret: string): string {
+  return hmac(secret, 'ignore-device:v1');
+}
+
+export function isIgnoredDevice(secret: string, cookie: string | undefined): boolean {
+  return typeof cookie === 'string' && cookie.length > 0 && safeEqual(cookie, ignoreDeviceToken(secret));
+}
+
 export function csrfToken(secret: string, sid: string): string {
   return hmac(secret, `csrf:${sid}`);
 }

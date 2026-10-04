@@ -144,6 +144,6 @@ describe('migrations', () => {
   it('apply on startup and are idempotent', () => {
     const db = openDatabase(':memory:');
     const applied = db.prepare('SELECT name FROM schema_migrations').pluck().all();
-    expect(applied).toEqual(['001_init.sql']);
+    expect(applied).toEqual(['001_init.sql', '002_qr_design_and_stats_reset.sql']);
   });
 });
